@@ -1,0 +1,10 @@
+{
+  "port": 3001,
+  "apiBase": "https://api.openai.com",
+  "apiKey": "sk-xxxx",
+  "organization": "org_xxx",
+  "project": "proj_xxx",
+  "logFile": "proxy-openai.log",
+  "timeoutMs": 300000,
+  "bodyLimit": "10mb"
+}
