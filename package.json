@@ -1,9 +1,12 @@
 {
   "scripts": {
+    "start": "node server.js",
     "start:anthropic": "node server-anthropic.js",
-    "start:openai": "node server-openai.js"
+    "start:openai": "node server-openai.js",
+    "start:raw": "node server-raw.js"
   },
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "ws": "^8.18.0"
   }
 }

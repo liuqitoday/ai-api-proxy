@@ -173,42 +173,123 @@ function formatResponseObject(payload) {
   return lines.join('\n');
 }
 
-function parseOpenAIResponseStream(raw) {
-  const blocks = splitSSEBlocks(raw);
-  const pieces = [];
-  let text = '';
-  let refusal = '';
-  const argBuffers = new Map();
-
-  function flushText() {
-    if (!text) return;
-    pieces.push(`\n[Text]\n${text}`);
-    text = '';
+function formatChatCompletionObject(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return String(payload);
   }
 
-  function flushRefusal() {
-    if (!refusal) return;
-    pieces.push(`\n[Refusal]\n${refusal}`);
-    refusal = '';
+  if (payload.object !== 'chat.completion') {
+    return pretty(payload);
   }
 
-  function flushArguments(itemId) {
-    const entry = argBuffers.get(itemId);
-    if (!entry || !entry.buffer) return;
+  const lines = [];
+  lines.push(`[completion_id: ${payload.id}] [model: ${payload.model}]`);
 
-    const parsedArgs = tryParseJson(entry.buffer);
-    pieces.push(`\n[Tool Arguments: ${entry.name || itemId} (${itemId})]`);
-    pieces.push(parsedArgs ? pretty(parsedArgs) : entry.buffer);
-    argBuffers.delete(itemId);
-  }
+  for (const choice of payload.choices || []) {
+    lines.push(`\n[Choice ${choice.index}] [finish_reason: ${choice.finish_reason}]`);
 
-  function flushAllArguments() {
-    for (const itemId of Array.from(argBuffers.keys())) {
-      flushArguments(itemId);
+    const message = choice.message;
+    if (!message) continue;
+
+    if (message.content) {
+      lines.push(`\n[Text]\n${message.content}`);
+    }
+    if (message.refusal) {
+      lines.push(`\n[Refusal]\n${message.refusal}`);
+    }
+    if (message.tool_calls) {
+      for (const tc of message.tool_calls) {
+        lines.push(`\n[Tool Call: ${tc.function?.name || 'unknown'} (${tc.id})]`);
+        const args = tc.function?.arguments;
+        if (args) {
+          const parsed = tryParseJson(args);
+          lines.push(parsed ? pretty(parsed) : args);
+        }
+      }
     }
   }
 
+  if (payload.usage) {
+    lines.push(
+      `\n[Usage] prompt_tokens=${payload.usage.prompt_tokens}, completion_tokens=${payload.usage.completion_tokens}, total_tokens=${payload.usage.total_tokens}`
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function extractChatCompletionFromStream(raw) {
+  const blocks = splitSSEBlocks(raw);
+  const assembled = {};
+  const choicesMap = {};
+
   for (const block of blocks) {
+    if (!block.data || block.data === '[DONE]') continue;
+    const payload = tryParseJson(block.data);
+    if (!payload) continue;
+
+    if (!assembled.id) {
+      assembled.id = payload.id;
+      assembled.model = payload.model;
+      assembled.created = payload.created;
+    }
+
+    for (const choice of payload.choices || []) {
+      const idx = choice.index;
+      if (!choicesMap[idx]) {
+        choicesMap[idx] = {
+          index: idx,
+          finish_reason: null,
+          message: { role: 'assistant', content: '', tool_calls: [] },
+        };
+      }
+
+      const delta = choice.delta || {};
+      if (delta.role) choicesMap[idx].message.role = delta.role;
+      if (delta.content) choicesMap[idx].message.content += delta.content;
+      if (delta.refusal) {
+        choicesMap[idx].message.refusal = (choicesMap[idx].message.refusal || '') + delta.refusal;
+      }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const tcIdx = tc.index;
+          if (!choicesMap[idx].message.tool_calls[tcIdx]) {
+            choicesMap[idx].message.tool_calls[tcIdx] = {
+              id: tc.id || '',
+              type: tc.type || 'function',
+              function: { name: '', arguments: '' },
+            };
+          }
+          if (tc.function?.name) choicesMap[idx].message.tool_calls[tcIdx].function.name += tc.function.name;
+          if (tc.function?.arguments) choicesMap[idx].message.tool_calls[tcIdx].function.arguments += tc.function.arguments;
+        }
+      }
+      if (choice.finish_reason) choicesMap[idx].finish_reason = choice.finish_reason;
+    }
+
+    if (payload.usage) {
+      assembled.usage = payload.usage;
+    }
+  }
+
+  if (!assembled.id) return null;
+
+  const choices = Object.values(choicesMap);
+  for (const c of choices) {
+    if (c.message.tool_calls.length === 0) delete c.message.tool_calls;
+  }
+
+  assembled.object = 'chat.completion';
+  assembled.choices = choices;
+
+  return assembled;
+}
+
+function extractResponseFromStream(raw) {
+  const blocks = splitSSEBlocks(raw);
+
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
     if (!block.data || block.data === '[DONE]') continue;
 
     const payload = tryParseJson(block.data);
@@ -216,125 +297,12 @@ function parseOpenAIResponseStream(raw) {
 
     const type = payload.type || block.event || 'unknown';
 
-    if (type === 'response.created') {
-      const response = payload.response || payload;
-      pieces.push(`[response_id: ${response.id}] [model: ${response.model}] [status: ${response.status}]`);
-      continue;
-    }
-
-    if (type === 'response.in_progress') {
-      pieces.push(`[status: in_progress]`);
-      continue;
-    }
-
-    if (type === 'response.output_text.delta') {
-      text += payload.delta || '';
-      continue;
-    }
-
-    if (type === 'response.output_text.done') {
-      if (typeof payload.text === 'string' && !text) {
-        text = payload.text;
-      }
-      flushText();
-      continue;
-    }
-
-    if (type === 'response.refusal.delta') {
-      refusal += payload.delta || '';
-      continue;
-    }
-
-    if (type === 'response.refusal.done') {
-      if (typeof payload.refusal === 'string' && !refusal) {
-        refusal = payload.refusal;
-      }
-      flushRefusal();
-      continue;
-    }
-
-    if (type === 'response.output_item.added') {
-      const item = payload.item;
-      if (isToolLikeItem(item)) {
-        flushText();
-        flushRefusal();
-        pieces.push(`\n[Tool Start: ${itemDisplayName(item)} (${item.call_id || item.id || 'unknown'})]`);
-      }
-      continue;
-    }
-
-    if (type === 'response.function_call_arguments.delta') {
-      const itemId = payload.item_id || 'unknown';
-      const previous = argBuffers.get(itemId) || { name: payload.name || null, buffer: '' };
-      previous.buffer += payload.delta || '';
-      if (!previous.name && payload.name) previous.name = payload.name;
-      argBuffers.set(itemId, previous);
-      continue;
-    }
-
-    if (type === 'response.function_call_arguments.done') {
-      const itemId = payload.item_id || 'unknown';
-      const previous = argBuffers.get(itemId) || { name: payload.name || null, buffer: '' };
-      if (typeof payload.arguments === 'string' && !previous.buffer) {
-        previous.buffer = payload.arguments;
-      }
-      if (!previous.name && payload.name) previous.name = payload.name;
-      argBuffers.set(itemId, previous);
-      flushArguments(itemId);
-      continue;
-    }
-
-    if (type === 'response.output_item.done') {
-      const item = payload.item;
-      if (isToolLikeItem(item)) {
-        flushText();
-        flushRefusal();
-        flushArguments(item.id);
-        pieces.push(`\n${formatToolItem(item)}`);
-      }
-      continue;
-    }
-
-    if (type === 'response.completed') {
-      const response = payload.response || payload;
-      flushText();
-      flushRefusal();
-      flushAllArguments();
-      pieces.push(`\n[status: completed]`);
-      if (response.usage) {
-        pieces.push(
-          `[Usage] input_tokens=${response.usage.input_tokens}, output_tokens=${response.usage.output_tokens}, total_tokens=${response.usage.total_tokens}`
-        );
-      }
-      continue;
-    }
-
-    if (type === 'response.failed') {
-      const response = payload.response || payload;
-      flushText();
-      flushRefusal();
-      flushAllArguments();
-      pieces.push(`\n[status: failed]`);
-      if (response.error) {
-        pieces.push(`[Error]\n${pretty(response.error)}`);
-      }
-      continue;
-    }
-
-    if (type === 'error') {
-      flushText();
-      flushRefusal();
-      flushAllArguments();
-      pieces.push(`\n[Error Event]\n${pretty(payload)}`);
-      continue;
+    if (type === 'response.completed' || type === 'response.failed') {
+      return payload.response || null;
     }
   }
 
-  flushText();
-  flushRefusal();
-  flushAllArguments();
-
-  return pieces.join('\n') || raw;
+  return null;
 }
 
 function buildUpstreamHeaders(req) {
@@ -412,8 +380,12 @@ app.post('/v1/responses', async (req, res) => {
       res.end();
 
       const raw = chunks.join('');
-      const parsed = parseOpenAIResponseStream(raw);
-      log(`<<< Response (stream, status ${response.status}):\n${parsed}`);
+      const completeResponse = extractResponseFromStream(raw);
+      if (completeResponse) {
+        log(`<<< Response (stream assembled, status ${response.status}):\n${pretty(completeResponse)}`);
+      } else {
+        log(`<<< Response (stream raw, status ${response.status}):\n${raw}`);
+      }
       return;
     }
 
@@ -440,6 +412,88 @@ app.post('/v1/responses', async (req, res) => {
   }
 });
 
+app.post('/v1/chat/completions', async (req, res) => {
+  log(`>>> [Chat Completions] Request Body:\n${pretty(req.body)}`);
+
+  const upstreamUrl = `${apiBase}/v1/chat/completions`;
+  const headers = buildUpstreamHeaders(req);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(upstreamUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(req.body),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutHandle);
+
+    const isStream = (response.headers.get('content-type') || '').includes('text/event-stream');
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => {
+      if (!['content-encoding', 'transfer-encoding', 'content-length'].includes(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    });
+
+    if (isStream) {
+      const chunks = [];
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        chunks.push(chunk);
+        res.write(chunk);
+      }
+
+      res.end();
+
+      const raw = chunks.join('');
+      const assembled = extractChatCompletionFromStream(raw);
+      if (assembled) {
+        log(`<<< [Chat Completions] Response (stream assembled, status ${response.status}):\n${formatChatCompletionObject(assembled)}`);
+      } else {
+        log(`<<< [Chat Completions] Response (stream raw, status ${response.status}):\n${raw}`);
+      }
+      return;
+    }
+
+    const responseBody = await response.text();
+    const parsedBody = tryParseJson(responseBody);
+    const formattedBody = parsedBody ? formatChatCompletionObject(parsedBody) : responseBody;
+    log(`<<< [Chat Completions] Response (status ${response.status}):\n${formattedBody}`);
+    res.send(responseBody);
+  } catch (err) {
+    clearTimeout(timeoutHandle);
+
+    const details = timedOut
+      ? `upstream request timed out after ${timeoutMs}ms`
+      : err.message;
+
+    log(`!!! [Chat Completions] Error: ${details}`);
+
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+
+    res.status(502).json({ error: 'upstream request failed', details });
+  }
+});
+
 app.listen(port, () => {
-  console.log(`OpenAI proxy listening on http://localhost:${port} -> ${apiBase}/v1/responses`);
+  console.log(`OpenAI proxy listening on http://localhost:${port} -> ${apiBase}`);
+  console.log(`  - POST /v1/responses`);
+  console.log(`  - POST /v1/chat/completions`);
 });

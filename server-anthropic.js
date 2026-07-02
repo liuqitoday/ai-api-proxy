@@ -10,11 +10,25 @@ function log(message) {
   fs.appendFileSync(config.logFile, line);
 }
 
-function parseSSEEvents(raw) {
-  const pieces = [];
-  let thinking = '';
-  let toolInput = '';
-  let textContent = '';
+function assembleStreamToJSON(raw) {
+  const message = {
+    id: null,
+    type: 'message',
+    role: 'assistant',
+    model: null,
+    content: [],
+    stop_reason: null,
+    stop_sequence: null,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0
+    }
+  };
+
+  const contentBlocks = {};
+  let currentBlockIndex = -1;
 
   for (const line of raw.split('\n')) {
     if (!line.startsWith('data: ')) continue;
@@ -24,57 +38,94 @@ function parseSSEEvents(raw) {
     try {
       const event = JSON.parse(json);
 
-      if (event.type === 'content_block_delta') {
-        const delta = event.delta;
-        if (delta.type === 'thinking_delta') {
-          thinking += delta.thinking;
-        } else if (delta.type === 'text_delta') {
-          textContent += delta.text;
-        } else if (delta.type === 'input_json_delta') {
-          toolInput += delta.partial_json;
+      if (event.type === 'message_start') {
+        const msg = event.message;
+        message.id = msg.id;
+        message.model = msg.model;
+        message.role = msg.role;
+        message.stop_reason = msg.stop_reason;
+        message.stop_sequence = msg.stop_sequence;
+        if (msg.usage) {
+          message.usage.input_tokens = msg.usage.input_tokens || 0;
+          message.usage.cache_creation_input_tokens = msg.usage.cache_creation_input_tokens || 0;
+          message.usage.cache_read_input_tokens = msg.usage.cache_read_input_tokens || 0;
         }
       } else if (event.type === 'content_block_start') {
+        currentBlockIndex = event.index;
         const block = event.content_block;
-        if (block.type === 'tool_use') {
-          if (toolInput) pieces.push({ type: 'tool_input', content: toolInput });
-          toolInput = '';
-          pieces.push({ type: 'tool_use_start', name: block.name, id: block.id });
+        contentBlocks[currentBlockIndex] = {
+          type: block.type,
+          text: block.text || '',
+          thinking: block.thinking || '',
+          signature: block.signature || '',
+          id: block.id || null,
+          name: block.name || null,
+          input: block.input || {},
+          partial_json: ''
+        };
+      } else if (event.type === 'content_block_delta') {
+        const idx = event.index;
+        const delta = event.delta;
+        const block = contentBlocks[idx];
+        if (!block) continue;
+
+        if (delta.type === 'text_delta') {
+          block.text += delta.text;
+        } else if (delta.type === 'thinking_delta') {
+          block.thinking += delta.thinking;
+        } else if (delta.type === 'signature_delta') {
+          block.signature += delta.signature;
+        } else if (delta.type === 'input_json_delta') {
+          block.partial_json += delta.partial_json;
         }
       } else if (event.type === 'content_block_stop') {
-        if (thinking) { pieces.push({ type: 'thinking', content: thinking }); thinking = ''; }
-        if (textContent) { pieces.push({ type: 'text', content: textContent }); textContent = ''; }
-        if (toolInput) { pieces.push({ type: 'tool_input', content: toolInput }); toolInput = ''; }
-      } else if (event.type === 'message_start') {
-        pieces.push({ type: 'message_start', model: event.message?.model, usage: event.message?.usage });
+        const idx = event.index;
+        const block = contentBlocks[idx];
+        if (block && block.partial_json) {
+          try {
+            block.input = JSON.parse(block.partial_json);
+          } catch {
+            block.input = { raw: block.partial_json };
+          }
+          delete block.partial_json;
+        }
       } else if (event.type === 'message_delta') {
-        pieces.push({ type: 'message_delta', stop_reason: event.delta?.stop_reason, usage: event.usage });
+        if (event.delta?.stop_reason) {
+          message.stop_reason = event.delta.stop_reason;
+        }
+        if (event.usage) {
+          message.usage.output_tokens = event.usage.output_tokens || 0;
+          if (event.usage.cache_creation_input_tokens !== undefined) {
+            message.usage.cache_creation_input_tokens = event.usage.cache_creation_input_tokens;
+          }
+          if (event.usage.cache_read_input_tokens !== undefined) {
+            message.usage.cache_read_input_tokens = event.usage.cache_read_input_tokens;
+          }
+        }
       }
     } catch {}
   }
 
-  // flush remaining
-  if (thinking) pieces.push({ type: 'thinking', content: thinking });
-  if (textContent) pieces.push({ type: 'text', content: textContent });
-  if (toolInput) pieces.push({ type: 'tool_input', content: toolInput });
+  // Build content array from content blocks
+  for (const idx of Object.keys(contentBlocks).sort((a, b) => Number(a) - Number(b))) {
+    const block = contentBlocks[idx];
+    const contentItem = { type: block.type };
 
-  // format readable output
-  const lines = [];
-  for (const p of pieces) {
-    if (p.type === 'message_start') {
-      lines.push(`[model: ${p.model}] [input_tokens: ${p.usage?.input_tokens}, cache_creation: ${p.usage?.cache_creation_input_tokens}, cache_read: ${p.usage?.cache_read_input_tokens}]`);
-    } else if (p.type === 'thinking') {
-      lines.push(`\n[Thinking]\n${p.content}`);
-    } else if (p.type === 'text') {
-      lines.push(`\n[Text]\n${p.content}`);
-    } else if (p.type === 'tool_use_start') {
-      lines.push(`\n[Tool Use: ${p.name} (${p.id})]`);
-    } else if (p.type === 'tool_input') {
-      try { lines.push(JSON.stringify(JSON.parse(p.content), null, 2)); } catch { lines.push(p.content); }
-    } else if (p.type === 'message_delta') {
-      lines.push(`\n[stop_reason: ${p.stop_reason}] [output_tokens: ${p.usage?.output_tokens}]`);
+    if (block.type === 'text') {
+      contentItem.text = block.text;
+    } else if (block.type === 'thinking') {
+      contentItem.thinking = block.thinking;
+      if (block.signature) contentItem.signature = block.signature;
+    } else if (block.type === 'tool_use') {
+      contentItem.id = block.id;
+      contentItem.name = block.name;
+      contentItem.input = block.input;
     }
+
+    message.content.push(contentItem);
   }
-  return lines.join('\n');
+
+  return message;
 }
 
 app.post('/v1/messages', async (req, res) => {
@@ -115,11 +166,16 @@ app.post('/v1/messages', async (req, res) => {
       res.end();
 
       const raw = chunks.join('');
-      const parsed = parseSSEEvents(raw);
-      log(`<<< Response (stream, status ${response.status}):\n${parsed}`);
+      const assembledJSON = assembleStreamToJSON(raw);
+      log(`<<< Response (stream assembled, status ${response.status}):\n${JSON.stringify(assembledJSON, null, 2)}`);
     } else {
       const responseBody = await response.text();
-      log(`<<< Response (status ${response.status}):\n${responseBody}`);
+      try {
+        const parsed = JSON.parse(responseBody);
+        log(`<<< Response (non-stream, status ${response.status}):\n${JSON.stringify(parsed, null, 2)}`);
+      } catch {
+        log(`<<< Response (non-stream, status ${response.status}):\n${responseBody}`);
+      }
       res.send(responseBody);
     }
   } catch (err) {
