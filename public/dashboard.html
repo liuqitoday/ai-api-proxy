@@ -700,7 +700,7 @@ main { display: flex; flex: 1; overflow: hidden; }
   <div class="modal">
     <div class="modal-header"><h2>Settings</h2><button class="close-btn" id="closeSettingsBtn">&#x2715;</button></div>
     <div class="modal-body">
-      <div class="warning-banner" id="portWarning" style="display:none">Port change requires restart</div>
+      <div class="warning-banner" id="portWarning" style="display:none">Port and body limit changes require restart</div>
       <form id="settingsForm">
         <div class="form-group"><label>Port</label><input type="number" name="port" min="1" max="65535"/></div>
         <div class="form-group"><label>Upstream URL</label><input type="text" name="apiBase" placeholder="https://api.openai.com"/></div>
@@ -915,8 +915,13 @@ function getResponsePreview(body) {
 }
 
 function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
@@ -979,13 +984,15 @@ function renderCardHTML(r) {
   const respPreview = getResponsePreview(r.responseBody);
   const cost = calcCost(r.model, r.tokenUsage?.input_tokens, r.tokenUsage?.output_tokens);
   const isReplaying = state.replayingId === r.id;
+  const canReplay = !r.requestBodyTruncated;
+  const replayBody = r.requestBody == null ? '' : JSON.stringify(r.requestBody, null, 2);
 
   return `<div class="request-card ${rcc}${selected ? ' selected' : ''}${isReplaying ? ' replaying' : ''}"
-       data-id="${r.id}">
+       data-id="${escapeHtml(r.id)}">
     <div class="card-main">
       <div class="card-header">
-        <span class="card-route ${rcc}">${shortRoute(r.route)}</span>
-        <span class="card-model">${r.model || '?'}</span>
+        <span class="card-route ${rcc}">${escapeHtml(shortRoute(r.route))}</span>
+        <span class="card-model">${escapeHtml(r.model || '?')}</span>
         <span class="card-time">${fmtTime(r.timestamp)}</span>
       </div>
       <div class="card-meta">
@@ -1003,25 +1010,24 @@ function renderCardHTML(r) {
     <div class="card-expanded">
       ${r.error ? `<div class="detail-error">${escapeHtml(r.error)}</div>` : ''}
       <div class="quick-meta">
-        <span>ID: ${r.id.slice(0,12)}…</span>
+        <span>ID: ${escapeHtml(r.id.slice(0,12))}…</span>
         <span>${fmtDateTime(r.timestamp)}</span>
         <span>Status: ${r.responseStatus || '?'}</span>
-        <span>Route: ${r.route}</span>
+        <span>Route: ${escapeHtml(r.route)}</span>
         ${r.tokenUsage ? `<span>in:${r.tokenUsage.input_tokens}  out:${r.tokenUsage.output_tokens}</span>` : ''}
         ${cost != null ? `<span style="color:var(--accent);font-weight:600">Cost: ${fmtCost(cost)}</span>` : ''}
       </div>
     </div>
     <div class="card-actions">
-      <button data-action="replay">Replay</button>
-      <button data-action="replay-edit">Edit &amp; Replay</button>
+      ${canReplay ? '<button data-action="replay">Replay</button><button data-action="replay-edit">Edit &amp; Replay</button>' : '<span style="font-size:10px;color:var(--text-tertiary)">Replay unavailable: captured body was truncated</span>'}
       <button data-action="detail">Detail</button>
     </div>
     <div class="card-replay-editor">
-      <textarea id="replay-ta-${r.id}">${escapeHtml(JSON.stringify(r.requestBody, null, 2))}</textarea>
+      <textarea id="replay-ta-${escapeHtml(r.id)}">${escapeHtml(replayBody)}</textarea>
       <div class="replay-actions">
         <span class="replay-loading" id="replay-loading-${r.id}" style="display:none"><span class="replay-spinner"></span> Sending…</span>
         <button class="replay-cancel" data-action="replay-cancel">Cancel</button>
-        <button class="replay-send" data-action="replay-send" data-id="${r.id}">Send</button>
+        <button class="replay-send" data-action="replay-send" data-id="${escapeHtml(r.id)}">Send</button>
       </div>
     </div>
   </div>`;
@@ -1056,10 +1062,10 @@ async function renderDetail(id) {
     const sc = r.responseStatus ? (r.responseStatus >= 200 && r.responseStatus < 300 ? 'status-2xx' : r.responseStatus >= 400 ? 'status-4xx' : 'status-error') : 'status-error';
     const cost = calcCost(r.model, r.tokenUsage?.input_tokens, r.tokenUsage?.output_tokens);
     el.detailMeta.innerHTML = `
-      <div class="item"><strong>ID</strong> ${r.id}</div>
+      <div class="item"><strong>ID</strong> ${escapeHtml(r.id)}</div>
       <div class="item"><strong>Time</strong> ${fmtDateTime(r.timestamp)}</div>
-      <div class="item"><strong>Route</strong> ${r.route}</div>
-      <div class="item"><strong>Model</strong> ${r.model || '?'}</div>
+      <div class="item"><strong>Route</strong> ${escapeHtml(r.route)}</div>
+      <div class="item"><strong>Model</strong> ${escapeHtml(r.model || '?')}</div>
       <div class="item"><strong>Status</strong> <span class="${sc}">${r.error?'ERR':(r.responseStatus||'?')}</span></div>
       <div class="item"><strong>Latency</strong> ${fmtLatency(r.latencyMs||0)}</div>
       ${r.tokenUsage ? `<div class="item"><strong>Tokens</strong> ${fmtTokens(r.tokenUsage)}</div>` : ''}
@@ -1069,15 +1075,16 @@ async function renderDetail(id) {
     `;
 
     if (r.error) {
-      el.detailError.innerHTML = `<div class="detail-error">${r.error}</div>`;
+      el.detailError.innerHTML = `<div class="detail-error">${escapeHtml(r.error)}</div>`;
       el.detailError.style.display = '';
     } else {
       el.detailError.style.display = 'none';
     }
 
-    const reqBody = r.requestBodyTruncated ? r.requestBodyPreview : r.requestBody;
+    const reqBody = (r.requestBodyTruncated || r.requestBodyDetailTruncated) ? r.requestBodyPreview : r.requestBody;
+    const resBody = (r.responseBodyTruncated || r.responseBodyDetailTruncated) ? r.responseBodyPreview : r.responseBody;
     renderBodyContent('requestBody', reqBody);
-    renderBodyContent('responseBody', r.responseBody);
+    renderBodyContent('responseBody', resBody);
   } catch (err) {
     el.detailEmpty.style.display = '';
     el.detailContent.style.display = 'none';
@@ -1125,12 +1132,12 @@ function renderLiveStream() {
 
   let html = '';
   for (const g of grouped.values()) {
-    html += `<div class="stream-entry"><div class="entry-header"><span>[${g.label||g.route}]</span>${g.usage ? `<span style="color:var(--success)">Tokens: ${fmtTokens(g.usage)}</span>` : ''}</div>`;
+    html += `<div class="stream-entry"><div class="entry-header"><span>[${escapeHtml(g.label||g.route)}]</span>${g.usage ? `<span style="color:var(--success)">Tokens: ${escapeHtml(fmtTokens(g.usage))}</span>` : ''}</div>`;
     for (const chunk of g.chunks) {
       if (chunk.type === 'text') {
         html += `<div class="entry-text">${escapeHtml(chunk.content)}</div>`;
       } else if (chunk.type === 'tool_start') {
-        html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${chunk.name||'tool'} (${chunk.id||''})</div><div class="tool-args">`;
+        html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${escapeHtml(chunk.name||'tool')} (${escapeHtml(chunk.id||'')})</div><div class="tool-args">`;
       } else if (chunk.type === 'tool_args') {
         html += `<span>${escapeHtml(chunk.content)}</span>`;
       } else if (chunk.type === 'thinking') {
@@ -1139,9 +1146,9 @@ function renderLiveStream() {
         html += `</div></div>`;
       } else if (chunk.type === 'item_added') {
         if (chunk.item && chunk.item.type === 'function_call') {
-          html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${chunk.item.name||'tool'} (${chunk.item.call_id||''})</div><div class="tool-args">`;
+          html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${escapeHtml(chunk.item.name||'tool')} (${escapeHtml(chunk.item.call_id||'')})</div><div class="tool-args">`;
         } else {
-          html += `<div class="entry-text" style="opacity:.6">[${chunk.item?.type||'item'}]</div>`;
+          html += `<div class="entry-text" style="opacity:.6">[${escapeHtml(chunk.item?.type||'item')}]</div>`;
         }
       } else if (chunk.type === 'item_done') { html += `</div></div>`; }
       else if (chunk.type === 'error') { html += `<div style="color:var(--danger)">${escapeHtml(chunk.error||'error')}</div>`; }
@@ -1173,7 +1180,7 @@ function renderStats() {
   const errorPct = (s.errorRate * 100).toFixed(1);
 
   el.statsCards.innerHTML = `
-    <div class="stat-card"><div class="stat-label">Requests</div><div class="stat-value">${s.totalRequests}</div><div class="stat-sub">${s.successfulRequests} ok &middot; ${s.errorRequests} err</div></div>
+      <div class="stat-card"><div class="stat-label">Requests</div><div class="stat-value">${s.totalRequests}</div><div class="stat-sub">${s.successfulRequests} ok &middot; ${s.errorRequests} err${s.pendingRequests ? ` &middot; ${s.pendingRequests} pending` : ''}</div></div>
     <div class="stat-card"><div class="stat-label">Error Rate</div><div class="stat-value" style="color:${s.errorRate>0.1?'var(--danger)':'var(--success)'}">${errorPct}%</div></div>
     <div class="stat-card"><div class="stat-label">Latency</div><div class="stat-value">${fmtLatency(s.averageLatencyMs)}</div><div class="stat-sub">Recent 20: ${fmtLatency(s.recentLatencyMs)}</div></div>
     <div class="stat-card"><div class="stat-label">Tokens / Cost</div><div class="stat-value" style="font-size:18px">${s.totalTokens.input.toLocaleString()} in &middot; ${s.totalTokens.output.toLocaleString()} out</div><div class="stat-sub">Est. cost: ${fmtCost(totalCost)}</div></div>
@@ -1187,7 +1194,7 @@ function renderStats() {
     chartsHtml += '<div class="bar-chart"><h3>By Model</h3>';
     for (const [model, count] of Object.entries(s.requestsByModel).sort((a,b)=>b[1]-a[1])) {
       const pct = Math.round((count/maxM)*100);
-      chartsHtml += `<div class="bar-row"><span class="bar-label">${model}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${count}</span></div>`;
+      chartsHtml += `<div class="bar-row"><span class="bar-label">${escapeHtml(model)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${count}</span></div>`;
     }
     chartsHtml += '</div>';
   }
@@ -1196,7 +1203,7 @@ function renderStats() {
     chartsHtml += '<div class="bar-chart"><h3>By Route</h3>';
     for (const [route, count] of Object.entries(s.requestsByRoute).sort((a,b)=>b[1]-a[1])) {
       const pct = Math.round((count/maxR)*100);
-      chartsHtml += `<div class="bar-row"><span class="bar-label">${route}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${count}</span></div>`;
+      chartsHtml += `<div class="bar-row"><span class="bar-label">${escapeHtml(route)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${count}</span></div>`;
     }
     chartsHtml += '</div>';
   }
@@ -1206,7 +1213,7 @@ function renderStats() {
     chartsHtml += '<div class="bar-chart"><h3>Cost by Model</h3>';
     for (const [model, cost] of [...costByModel.entries()].sort((a,b)=>b[1]-a[1])) {
       const pct = Math.round((cost/maxC)*100);
-      chartsHtml += `<div class="bar-row"><span class="bar-label">${model}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${fmtCost(cost)}</span></div>`;
+      chartsHtml += `<div class="bar-row"><span class="bar-label">${escapeHtml(model)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${fmtCost(cost)}</span></div>`;
     }
     chartsHtml += '</div>';
   }
@@ -1300,20 +1307,55 @@ function selectRequest(id) {
   renderDetail(id);
 }
 
+async function loadRequestDetail(id) {
+  const index = state.requests.findIndex(r => r.id === id);
+  const existing = index >= 0 ? state.requests[index] : null;
+  if (existing && (
+    Object.prototype.hasOwnProperty.call(existing, 'requestBody') ||
+    Object.prototype.hasOwnProperty.call(existing, 'requestBodyPreview')
+  )) return existing;
+
+  const detail = await apiGet('/__api/requests/' + encodeURIComponent(id));
+  if (index >= 0) state.requests[index] = { ...existing, ...detail };
+  return detail;
+}
+
+function displayedBody(record, target) {
+  if (!record) return null;
+  if (target === 'requestBody') {
+    return (record.requestBodyTruncated || record.requestBodyDetailTruncated) ? record.requestBodyPreview : record.requestBody;
+  }
+  return (record.responseBodyTruncated || record.responseBodyDetailTruncated) ? record.responseBodyPreview : record.responseBody;
+}
+
 // ========== Actions ==========
 const CARD_ACTIONS = {
-  replay(id) {
-    const r = state.requests.find(x => x.id === id);
-    if (r) { state.requests.unshift({ ...r }); doReplay(id, r.requestBody); }
+  async replay(id) {
+    try {
+      const r = state.requests.find(item => item.id === id);
+      if (!r) return;
+      if (r.requestBodyTruncated) return toast('Replay unavailable: request capture was truncated', true);
+      await doReplay(id, null, null, true);
+    } catch (err) {
+      toast('Unable to load request: ' + err.message, true);
+    }
   },
-  'replay-edit'(id) {
-    state.replayingId = state.replayingId === id ? null : id;
-    renderRequestList();
-    if (state.replayingId) {
-      setTimeout(() => {
-        const ta = document.getElementById('replay-ta-' + id);
-        if (ta) ta.focus();
-      }, 50);
+  async 'replay-edit'(id) {
+    try {
+      const r = await loadRequestDetail(id);
+      if (r.requestBodyTruncated || r.requestBodyDetailTruncated) {
+        return toast('Edit unavailable: request body is larger than the detail limit', true);
+      }
+      state.replayingId = state.replayingId === id ? null : id;
+      renderRequestList();
+      if (state.replayingId) {
+        setTimeout(() => {
+          const ta = document.getElementById('replay-ta-' + id);
+          if (ta) ta.focus();
+        }, 50);
+      }
+    } catch (err) {
+      toast('Unable to load request: ' + err.message, true);
     }
   },
   'replay-send'(id) {
@@ -1321,7 +1363,8 @@ const CARD_ACTIONS = {
     if (!ta) return;
     let body;
     try { body = JSON.parse(ta.value); } catch { toast('Invalid JSON', true); return; }
-    doReplay(id, body);
+    const record = state.requests.find(r => r.id === id);
+    doReplay(id, body, record && record.route, false);
   },
   'replay-cancel'() {
     state.replayingId = null;
@@ -1330,12 +1373,12 @@ const CARD_ACTIONS = {
   detail(id) { selectRequest(id); },
 };
 
-async function doReplay(id, requestBody) {
-  const record = state.requests.find(r => r.id === id);
-  if (!record) return;
+async function doReplay(id, requestBody, route, useStoredRequest) {
+  if (!useStoredRequest && !route) return;
   renderRequestList();
   try {
-    await apiPost('/__api/replay', { requestBody, route: record.route });
+    const payload = useStoredRequest ? { requestId: id } : { requestBody, route };
+    await apiPost('/__api/replay', payload);
     state.replayingId = null;
     toast('Replay complete');
   } catch (err) {
@@ -1351,7 +1394,8 @@ function fillSettingsForm() {
   const f = el.settingsForm;
   f.port.value = cfg.port || 3000;
   f.apiBase.value = cfg.apiBase || '';
-  f.apiKey.value = cfg.apiKey || '';
+  f.apiKey.value = '';
+  f.apiKey.placeholder = cfg.hasApiKey ? 'Configured (leave blank to keep)' : 'sk-...';
   f.organization.value = cfg.organization || '';
   f.project.value = cfg.project || '';
   f.timeoutMs.value = cfg.timeoutMs || 300000;
@@ -1363,10 +1407,11 @@ function fillSettingsForm() {
 
 async function saveSettings() {
   const f = el.settingsForm;
+  const portChanged = parseInt(f.port.value) !== (state.config && state.config.port);
+  const bodyLimitChanged = f.bodyLimit.value.trim() !== (state.config && state.config.bodyLimit);
   const data = {
     port: parseInt(f.port.value) || 3000,
     apiBase: f.apiBase.value.trim() || 'https://api.openai.com',
-    apiKey: f.apiKey.value,
     organization: f.organization.value.trim(),
     project: f.project.value.trim(),
     timeoutMs: parseInt(f.timeoutMs.value) || 300000,
@@ -1375,13 +1420,15 @@ async function saveSettings() {
     ringBufferSize: parseInt(f.ringBufferSize.value) || 500,
     enableFileLogging: f.enableFileLogging.checked,
   };
+  if (f.apiKey.value) data.apiKey = f.apiKey.value;
   try {
     const result = await apiPut('/__api/config', data);
     state.config = result.config;
     toast('Settings saved');
     el.settingsModal.classList.remove('open');
-    if (data.port !== (state.config && state.config.port)) {
-      setTimeout(() => toast('Port change requires restart', true), 3000);
+    f.apiKey.value = '';
+    if (portChanged || bodyLimitChanged) {
+      setTimeout(() => toast('Port or body limit change requires restart', true), 3000);
     }
   } catch (err) { toast('Save failed: ' + err.message, true); }
 }
@@ -1475,7 +1522,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const parent = e.target.closest('.detail-body');
     parent.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
     e.target.classList.add('active');
-    const body = target === 'requestBody' ? selectedRequest?.requestBody : selectedRequest?.responseBody;
+    const body = displayedBody(selectedRequest, target);
     renderBodyContent(target, body);
   });
 
@@ -1483,7 +1530,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('click', (e) => {
     if (!e.target.classList.contains('copy-btn')) return;
     const target = e.target.dataset.target;
-    const body = target === 'requestBody' ? selectedRequest?.requestBody : selectedRequest?.responseBody;
+    const body = displayedBody(selectedRequest, target);
     const text = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
     navigator.clipboard.writeText(text || '').then(() => toast('Copied')).catch(() => toast('Copy failed', true));
   });
@@ -1495,9 +1542,11 @@ document.addEventListener('DOMContentLoaded', () => {
   el.settingsModal.addEventListener('click', (e) => { if (e.target === el.settingsModal) el.settingsModal.classList.remove('open'); });
 
   const portInput = el.settingsForm.querySelector('[name="port"]');
-  const origPort = state.config && state.config.port;
   portInput.addEventListener('input', () => {
-    el.portWarning.style.display = (parseInt(portInput.value) !== origPort) ? '' : 'none';
+    el.portWarning.style.display = (parseInt(portInput.value) !== (state.config && state.config.port)) ? '' : 'none';
+  });
+  el.settingsForm.querySelector('[name="bodyLimit"]').addEventListener('input', function () {
+    el.portWarning.style.display = (this.value.trim() !== (state.config && state.config.bodyLimit)) ? '' : 'none';
   });
 
   $('#saveSettingsBtn').addEventListener('click', saveSettings);

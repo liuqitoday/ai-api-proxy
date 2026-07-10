@@ -1,0 +1,17 @@
+{
+  "host": "127.0.0.1",
+  "port": 3000,
+  "apiBase": "https://api.openai.com",
+  "apiKey": "",
+  "proxyAccessToken": "",
+  "allowRemoteAccess": false,
+  "organization": "",
+  "project": "",
+  "logFile": "proxy.log",
+  "maxLogFileBytes": 52428800,
+  "timeoutMs": 300000,
+  "bodyLimit": "10mb",
+  "ringBufferSize": 500,
+  "maxCaptureBytes": 1048576,
+  "enableFileLogging": true
+}

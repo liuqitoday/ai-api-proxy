@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const config = require('./config.json');
+const apiBase = String(config.apiBase || config.upstream || '').replace(/\/+$/, '');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -132,8 +133,8 @@ app.post('/v1/messages', async (req, res) => {
   log(`>>> Request Body:\n${JSON.stringify(req.body, null, 2)}`);
 
   try {
-    const upstreamUrl = `${config.upstream}/v1/messages`;
-    const headers = { ...req.headers, host: new URL(config.upstream).host };
+    const upstreamUrl = `${apiBase}/v1/messages`;
+    const headers = { ...req.headers, host: new URL(apiBase).host };
     delete headers['content-length'];
 
     const response = await fetch(upstreamUrl, {
@@ -184,6 +185,6 @@ app.post('/v1/messages', async (req, res) => {
   }
 });
 
-app.listen(config.port, () => {
-  console.log(`Proxy listening on http://localhost:${config.port} -> ${config.upstream}`);
+app.listen(config.port, '127.0.0.1', () => {
+  console.log(`Proxy listening on http://127.0.0.1:${config.port} -> ${apiBase}`);
 });

@@ -276,8 +276,8 @@ app.post('/v1/messages', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Raw proxy listening on http://localhost:${port} -> ${apiBase}`);
+app.listen(port, '127.0.0.1', () => {
+  console.log(`Raw proxy listening on http://127.0.0.1:${port} -> ${apiBase}`);
   console.log(`  - POST /v1/responses`);
   console.log(`  - POST /v1/chat/completions`);
   console.log(`  - POST /v1/messages`);

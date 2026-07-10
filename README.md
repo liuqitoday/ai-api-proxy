@@ -73,19 +73,28 @@ npm install
 
 ### 2. 配置
 
-编辑 `config.json`，填入上游服务地址和可选鉴权信息：
+从示例创建 `config.json`，再填入上游服务地址和可选鉴权信息：
+
+```bash
+cp config.json.example config.json
+```
 
 ```json
 {
+  "host": "127.0.0.1",
   "port": 3000,
   "apiBase": "https://your-ai-api-upstream",
   "apiKey": "sk-xxxx",
+  "proxyAccessToken": "",
+  "allowRemoteAccess": false,
   "organization": "org_xxx",
   "project": "proj_xxx",
   "logFile": "proxy.log",
+  "maxLogFileBytes": 52428800,
   "timeoutMs": 300000,
   "bodyLimit": "10mb",
   "ringBufferSize": 500,
+  "maxCaptureBytes": 1048576,
   "enableFileLogging": true
 }
 ```
@@ -195,6 +204,8 @@ curl http://localhost:3000/v1/chat/completions \
 
 Dashboard 使用的内部 API，也可直接调用：
 
+这些管理接口和 WebSocket 只接受来自本机的连接。即使代理路由显式开放到局域网，Dashboard 也不会随之开放。
+
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/__api/config` | 读取配置（apiKey 已脱敏） |
@@ -222,18 +233,37 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `host` | string | `127.0.0.1` | 监听地址；修改后需重启 |
 | `port` | number | `3000` | 本地监听端口 |
 | `apiBase` | string | `https://api.openai.com` | 上游服务根地址（兼容旧字段 `upstream`） |
-| `apiKey` | string | `""` | 默认 API Key，请求头中已有时不覆盖 |
+| `apiKey` | string | `""` | 上游 API Key；管理 API 永不返回其内容 |
+| `proxyAccessToken` | string | `""` | 代理访问令牌，调用方通过 `x-proxy-token` 发送 |
+| `allowRemoteAccess` | boolean | `false` | 是否允许监听非本机地址；同时必须配置访问令牌 |
 | `organization` | string | `""` | 可选 OpenAI Organization 头 |
 | `project` | string | `""` | 可选 OpenAI Project 头 |
 | `logFile` | string | `proxy.log` | 日志文件路径 |
+| `maxLogFileBytes` | number | `52428800` | 单个日志文件上限，超限轮转为 `.1` |
 | `timeoutMs` | number | `300000` | 上游请求超时时间（毫秒） |
 | `bodyLimit` | string | `10mb` | JSON Body 大小限制 |
 | `ringBufferSize` | number | `500` | 内存保留的请求记录数，超限时淘汰最早的 |
+| `maxCaptureBytes` | number | `1048576` | 每个请求或响应在 Dashboard/日志中的最大捕获字节数 |
 | `enableFileLogging` | boolean | `true` | 是否启用文件日志 |
 
-> 💡 端口修改需要重启服务；其他配置保存后即时生效。修改 `ringBufferSize` 会自动调整缓冲区容量。
+> `host`、`port` 和 `bodyLimit` 修改后需要重启服务；其他配置保存后即时生效。修改 `ringBufferSize` 会自动调整缓冲区容量。
+
+### 局域网访问
+
+默认只监听 `127.0.0.1`。确实需要让其他机器调用代理时，必须显式配置：
+
+```json
+{
+  "host": "0.0.0.0",
+  "allowRemoteAccess": true,
+  "proxyAccessToken": "use-a-long-random-token"
+}
+```
+
+远程调用时增加 `x-proxy-token: use-a-long-random-token` 请求头。该请求头不会转发给上游，Dashboard 和 `/__api/*` 仍只允许本机访问。
 
 ## 关键原理
 
@@ -253,17 +283,17 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 
 1. 从上游按块读取 SSE 数据，每读到一个 chunk 立即 `res.write()` 给客户端
 2. 同步解析 chunk 中的 SSE 事件，通过 WebSocket 推送到 Dashboard 实时流面板
-3. 流结束后将完整 SSE 数据组装为结构化 JSON，存入内存环形缓冲区并写入日志文件
+3. 在 `maxCaptureBytes` 范围内组装结构化 JSON，存入内存环形缓冲区并写入日志文件
 
 代理不会因为 Dashboard 连接断开而影响客户端的流式体验，也不会因为大量 Dashboard 连接而导致上游流量放大。
 
 ### 3. 客户端断连传播
 
-如果调用方在流式响应过程中断开连接（关闭页面、取消请求），代理会监听到 `req.on('close')` 并立即 abort 上游 `fetch`。这避免了代理层充当缓冲池——不会继续从上游下载无人接收的数据。
+如果调用方在流式响应过程中断开连接（关闭页面、取消请求），代理会监听响应连接的 `close` 事件并立即 abort 上游 `fetch`。这避免了代理层继续下载无人接收的数据。
 
 ### 4. 环形缓冲区 + O(1) ID 索引
 
-请求记录存于内存环形缓冲区（默认 500 条），超限时从头部淘汰。ID 查找通过 `Map` 实现 O(1)，不随缓冲区大小线性增长。统计指标（总请求数、成功/失败、token 总量、延迟均值）在 `add()` 时累计算，`getStats()` 无需遍历。
+请求记录存于内存环形缓冲区（默认 500 条），超限时从头部淘汰。ID 查找通过 `Map` 实现 O(1)。请求开始时登记总量，完成时一次性累计成功/失败、token 和延迟；在途请求单独计入 `pendingRequests`。
 
 ### 5. SSE 事件解析
 
@@ -287,27 +317,36 @@ Dashboard 内置 30+ 模型定价表，通过模糊匹配模型名自动识别�
 
 ## 日志
 
-日志默认记录：请求体、响应体、流式组装结果、异常信息。日志写入使用 `fs.appendFileSync`，符合此项目 "逻辑简单、无额外依赖" 的原则，但不适合高并发或长期运行环境。
+日志默认记录请求体、响应体、流式组装结果和异常信息。日志通过异步队列顺序写入，超过 `maxLogFileBytes` 时轮转为 `.1`，单次记录受 `maxCaptureBytes` 限制。
 
-请注意：日志可能包含敏感数据，当前不做脱敏和轮转。生产环境建议补充。
+请注意：日志仍可能包含提示词、工具参数等敏感业务数据，不需要时应关闭文件日志。
 
 ## 已知限制
 
 - 当前仍是 "轻量代理"，不是生产级 API 网关
-- 没有鉴权白名单、限流、熔断、重试等生产能力
+- 没有限流、熔断、重试等生产网关能力
 - 流式日志解析针对主流事件格式，不保证覆盖所有未来事件类型
-- 大流式响应会额外占用一份内存用于日志解析
-- Dashboard 无认证，任何能访问端口的人都能看到所有请求
-- 当前没有测试代码
+- 请求历史仅保存在内存中，进程重启后会清空
+- Dashboard 没有独立登录页，因此管理界面强制仅限本机
+- 旧版独立入口主要用于兼容，安全边界和功能不如统一入口完整
 
 ## Roadmap
 
 - 增加环境变量配置支持
 - 增加请求 ID 与结构化日志
-- 增加脱敏和日志轮转
+- 增加可配置的字段级业务数据脱敏
 - 增加协议适配层，例如 `messages → responses`
-- 增加测试与 CI
+- 增加 CI 和浏览器端端到端测试
 - Dashboard 支持多上游管理及按模型路由
+
+## 测试
+
+```bash
+npm run check
+npm test
+```
+
+测试覆盖配置校验与密钥隐藏、请求统计生命周期、代理头部/查询参数转发，以及流式捕获上限。
 
 ## 贡献
 
