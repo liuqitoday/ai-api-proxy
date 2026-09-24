@@ -30,6 +30,23 @@ async function startUpstream() {
       let parsed = {};
       try { parsed = JSON.parse(body); } catch {}
 
+      // Anthropic reports mid-stream failures as an SSE error event after the
+      // response has already started with a 200.
+      if (parsed.model === 'stream-error') {
+        res.setHeader('content-type', 'text/event-stream');
+        res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_err', model: 'claude-sonnet-4-6', role: 'assistant', usage: { input_tokens: 900, output_tokens: 0 } } })}\n\n`);
+        res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })}\n\n`);
+        res.end();
+        return;
+      }
+
+      // A gateway can claim SSE and then send something else entirely.
+      if (parsed.model === 'not-sse') {
+        res.setHeader('content-type', 'text/event-stream');
+        res.end('this is not SSE formatted at all\njust lines\n');
+        return;
+      }
+
       if (parsed.stream) {
         res.setHeader('content-type', 'text/event-stream');
         for (const text of ['alpha ', 'beta ', 'gamma']) {
@@ -109,7 +126,8 @@ test('replay re-uses the headers of the original request', async t => {
   assert.equal(upstream.seen[0].headers.host, new URL(upstream.url).host);
 });
 
-test('replay never forwards masked credentials to the upstream', async t => {  const { base, upstream } = await startApp(t);
+test('replay never forwards masked credentials to the upstream', async t => {
+  const { base, upstream } = await startApp(t);
 
   await postJSON(`${base}/v1/messages`, MESSAGES_REQUEST, {
     authorization: 'Bearer client-supplied-key',
@@ -215,6 +233,41 @@ test('the request list carries previews and cost so cards survive a reload', asy
   const stats = await (await fetch(`${base}/__api/stats`)).json();
   assert.equal(stats.totalCostUsd, 0.00045);
   assert.deepEqual(stats.costByModel, { 'gpt-4o-mini': 0.00045 });
+});
+
+test('a stream that fails mid-flight keeps its error in the record', async t => {
+  const { base } = await startApp(t);
+
+  const response = await postJSON(`${base}/v1/messages`, {
+    model: 'stream-error',
+    stream: true,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(response.status, 200, 'the stream had already started');
+
+  const [summary] = await (await fetch(`${base}/__api/requests`)).json();
+  const record = await (await fetch(`${base}/__api/requests/${summary.id}`)).json();
+
+  assert.deepEqual(record.responseBody.error, { type: 'overloaded_error', message: 'Overloaded' });
+  assert.match(record.responsePreview, /Overloaded/, 'the list preview must show the failure');
+});
+
+test('a stream whose payload is unparseable keeps the raw bytes', async t => {
+  const { base } = await startApp(t);
+
+  const response = await postJSON(`${base}/v1/messages`, {
+    model: 'not-sse',
+    stream: true,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(await response.text(), 'this is not SSE formatted at all\njust lines\n');
+
+  const [summary] = await (await fetch(`${base}/__api/requests`)).json();
+  const record = await (await fetch(`${base}/__api/requests/${summary.id}`)).json();
+
+  assert.equal(record.responseBodyTruncated, false);
+  assert.equal(record.responseBody._raw_stream, 'this is not SSE formatted at all\njust lines\n');
+  assert.equal(record.error, null, 'an unparseable stream is not an error, it just cannot be assembled');
 });
 
 test('streamed deltas reach the dashboard over the websocket', async t => {

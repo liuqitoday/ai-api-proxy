@@ -25,7 +25,7 @@
 - **Web Dashboard**：Timeline 风格请求卡片、实时流查看、统计面板、在线配置
 - **Replay 重放**：一键重发历史请求，内嵌 JSON 编辑器支持快速修改，并复用原始请求头
 - **费用估算**：服务端匹配模型定价（Claude / GPT / Gemini），按请求和按模型统计
-- **失败可见**：上游报错、body 解析失败、超过体积限制，都会作为一条记录出现在列表里
+- **失败可见**：上游报错（含流式响应中途报错）、body 解析失败、超过体积限制，都会作为一条记录出现在列表里
 - **路由筛选**：按 API 路由和 HTTP 状态码快速过滤请求列表
 - **WebSocket 实时推送**：流式响应在浏览器中实时展现，请求结果即时推送
 - 支持 Anthropic `messages`、OpenAI `responses`、`chat/completions` 协议
@@ -339,6 +339,12 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 - 状态信息和 token usage 分布在多个事件里
 
 代理在流结束后将碎片事件组装为结构化 JSON（如 Anthropic Message 对象或 OpenAI Response 对象），便于日志查看和 Dashboard 展示。
+
+组装以不丢信息为前提：
+
+- **上游在流中间报错**（例如 Anthropic 的 `overloaded_error`）不会因为 HTTP 状态已经是 200 就被丢掉——错误对象会和已经收到的部分内容一起保留在记录里，卡片预览显示为 `[Error] ...`，Live 面板也会实时显示一行错误。
+- **工具调用的参数**如果在流结束前没等到 `content_block_stop`，原始 `partial_json` 会原样保留，而不是留一个空的 `input`。
+- **完全无法组装的载荷**（例如网关声称 `text/event-stream` 却发了别的东西）不会被压成一个空消息，而是原样保留原始字节，记录里以 `_raw_stream` 呈现。
 
 ### 6. 请求费用估算
 
