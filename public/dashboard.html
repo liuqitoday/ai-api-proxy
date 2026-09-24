@@ -453,6 +453,9 @@ main { display: flex; flex: 1; overflow: hidden; }
   color: var(--text-tertiary); margin-bottom: 6px; display: flex; gap: 12px;
 }
 .stream-entry .entry-text { white-space: pre-wrap; word-break: break-word; }
+.stream-entry .entry-thinking { opacity: .6; font-style: italic; }
+.stream-entry .entry-note { opacity: .6; }
+.stream-entry .entry-error { color: var(--danger); }
 .stream-entry .entry-tool {
   background: var(--surface); padding: 10px 14px; border-radius: var(--radius);
   border-left: 2px solid var(--accent); margin: 6px 0;
@@ -722,65 +725,9 @@ main { display: flex; flex: 1; overflow: hidden; }
 </div>
 
 <script>
-// ========== Model Pricing (per 1M tokens) ==========
-const MODEL_PRICING = {
-  'claude-opus-4-8':   { input: 15.00, output: 75.00 },
-  'claude-opus-4-1':   { input: 15.00, output: 75.00 },
-  'claude-opus-4':     { input: 15.00, output: 75.00 },
-  'claude-sonnet-4-6': { input: 3.00,  output: 15.00 },
-  'claude-sonnet-4':   { input: 3.00,  output: 15.00 },
-  'claude-haiku-4-5':  { input: 0.80,  output: 4.00 },
-  'claude-haiku-4':    { input: 0.80,  output: 4.00 },
-  'claude-fable-5':    { input: 3.00,  output: 15.00 },
-  'claude-3.5-sonnet': { input: 3.00,  output: 15.00 },
-  'claude-3.5-haiku':  { input: 0.80,  output: 4.00 },
-  'claude-3-opus':     { input: 15.00, output: 75.00 },
-  'gpt-5':             { input: 1.25,  output: 10.00 },
-  'gpt-5-mini':        { input: 0.15,  output: 0.60 },
-  'gpt-5-nano':        { input: 0.075, output: 0.30 },
-  'gpt-4.1':           { input: 2.00,  output: 8.00 },
-  'gpt-4.1-mini':      { input: 0.40,  output: 1.60 },
-  'gpt-4.1-nano':      { input: 0.10,  output: 0.40 },
-  'gpt-4o':            { input: 2.50,  output: 10.00 },
-  'gpt-4o-mini':       { input: 0.15,  output: 0.60 },
-  'o4-mini':           { input: 1.10,  output: 4.40 },
-  'o3':                { input: 10.00, output: 40.00 },
-  'gemini-2.5-pro':    { input: 1.25,  output: 10.00 },
-  'gemini-2.5-flash':  { input: 0.15,  output: 0.60 },
-};
-
-// Memoization helpers
-function memoize(fn) {
-  const cache = new Map();
-  return function (...args) {
-    const key = args.join('|');
-    if (cache.has(key)) return cache.get(key);
-    const v = fn.apply(null, args);
-    cache.set(key, v);
-    return v;
-  };
-}
-
-const _findPricing = function (model) {
-  if (!model) return null;
-  const m = model.toLowerCase();
-  for (const [key, p] of Object.entries(MODEL_PRICING)) {
-    if (m === key.toLowerCase()) return p;
-  }
-  const keys = Object.keys(MODEL_PRICING).sort((a,b) => b.length - a.length);
-  for (const key of keys) {
-    if (m.includes(key.toLowerCase())) return MODEL_PRICING[key];
-  }
-  return null;
-};
-const findPricing = memoize(_findPricing);
-
-const _calcCost = function (model, inputTokens, outputTokens) {
-  const p = findPricing(model);
-  if (!p || (!inputTokens && !outputTokens)) return null;
-  return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
-};
-const calcCost = memoize(_calcCost);
+// ========== Formatting ==========
+// Cost, previews and token usage are computed server-side, so every panel and
+// the stats API report the same numbers over the same window.
 
 function fmtCost(cost) {
   if (cost == null) return '—';
@@ -790,18 +737,22 @@ function fmtCost(cost) {
 }
 
 // ========== State ==========
+const MAX_STREAM_GROUPS = 30;
+
 const state = {
   requests: [],
   selectedId: null,
+  expandedId: null,
   stats: null,
   config: null,
-  streamMessages: [],
+  streamGroups: [],
   wsConnected: false,
   autoScroll: true,
   streamAutoScroll: true,
   bodyModes: { requestBody: 'pretty', responseBody: 'pretty' },
   filters: { route: '', status: '' },
   replayingId: null,
+  replayDraft: {},
 };
 
 const $ = s => document.querySelector(s);
@@ -869,49 +820,10 @@ function statusData(st) {
   return { icon: '✕', cls: 'err' };
 }
 
-// Preview text
-function getRequestPreview(body) {
-  if (!body || typeof body !== 'object') return '';
-  if (body.messages && Array.isArray(body.messages)) {
-    const lastMsg = body.messages[body.messages.length - 1];
-    if (lastMsg && lastMsg.content) {
-      if (typeof lastMsg.content === 'string') return lastMsg.content.slice(0, 80);
-      if (Array.isArray(lastMsg.content)) {
-        return lastMsg.content.filter(c => c.type === 'text').map(c => c.text).join(' ').slice(0, 80);
-      }
-    }
-  }
-  if (body.input) {
-    if (typeof body.input === 'string') return body.input.slice(0, 80);
-    if (Array.isArray(body.input)) return body.input.map(m => m.content || '').filter(Boolean).join(' ').slice(0, 80);
-  }
-  if (body.messages) {
-    const last = body.messages[body.messages.length - 1];
-    if (last && last.content) return String(last.content).slice(0, 80);
-  }
-  return '';
-}
-function getResponsePreview(body) {
-  if (!body || typeof body !== 'object') return '';
-  if (body.content && Array.isArray(body.content)) {
-    return body.content.filter(c => c.type === 'text').map(c => c.text).join(' ').slice(0, 80);
-  }
-  if (body.output && Array.isArray(body.output)) {
-    for (const item of body.output) {
-      if (item.type === 'message' && item.content) {
-        const texts = item.content.filter(c => c.type === 'output_text').map(c => c.text).join(' ');
-        if (texts) return texts.slice(0, 80);
-      }
-    }
-  }
-  if (body.choices && Array.isArray(body.choices)) {
-    const msg = body.choices[0].message;
-    if (msg && msg.content) return msg.content.slice(0, 80);
-    if (msg && msg.refusal) return '[Refusal] ' + msg.refusal.slice(0, 70);
-  }
-  if (body.error) return '[Error] ' + (typeof body.error === 'string' ? body.error : JSON.stringify(body.error)).slice(0, 70);
-  if (body._raw_stream) return '[Raw Stream] ' + body._raw_stream.slice(0, 70);
-  return '';
+// Preview text comes from the server so list refreshes and live pushes agree.
+function previewOf(record, key) {
+  const text = record && record[key];
+  return typeof text === 'string' ? text : '';
 }
 
 function escapeHtml(str) {
@@ -978,16 +890,19 @@ function applyFilters(data) {
 // ========== RENDER: Cards ==========
 function renderCardHTML(r) {
   const selected = r.id === state.selectedId;
+  const expanded = r.id === state.expandedId;
   const rcc = routeCardClass(r.route);
   const sd = statusData(r.responseStatus);
-  const preview = getRequestPreview(r.requestBody);
-  const respPreview = getResponsePreview(r.responseBody);
-  const cost = calcCost(r.model, r.tokenUsage?.input_tokens, r.tokenUsage?.output_tokens);
+  const preview = previewOf(r, 'requestPreview');
+  const respPreview = previewOf(r, 'responsePreview');
+  const cost = typeof r.costUsd === 'number' ? r.costUsd : null;
   const isReplaying = state.replayingId === r.id;
   const canReplay = !r.requestBodyTruncated;
-  const replayBody = r.requestBody == null ? '' : JSON.stringify(r.requestBody, null, 2);
+  const replayBody = Object.prototype.hasOwnProperty.call(state.replayDraft, r.id)
+    ? state.replayDraft[r.id]
+    : (r.requestBody == null ? '' : JSON.stringify(r.requestBody, null, 2));
 
-  return `<div class="request-card ${rcc}${selected ? ' selected' : ''}${isReplaying ? ' replaying' : ''}"
+  return `<div class="request-card ${rcc}${selected ? ' selected' : ''}${expanded ? ' expanded' : ''}${isReplaying ? ' replaying' : ''}"
        data-id="${escapeHtml(r.id)}">
     <div class="card-main">
       <div class="card-header">
@@ -1043,6 +958,35 @@ function renderRequestList() {
   el.requestList.innerHTML = data.map(r => renderCardHTML(r)).join('');
 }
 
+function cardElement(id) {
+  return el.requestList.querySelector(`.request-card[data-id="${id}"]`);
+}
+
+// Patch a single card instead of rebuilding the list, so expanded cards, open
+// replay editors and text selection survive incoming traffic. A record only
+// arrives here when it is created or completed, so a new card is the newest one.
+function replaceCard(record) {
+  const visible = applyFilters(state.requests).some(r => r.id === record.id);
+  const existing = cardElement(record.id);
+  if (!visible) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) {
+    existing.outerHTML = renderCardHTML(record);
+    return;
+  }
+  const emptyState = el.requestList.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+  el.requestList.insertAdjacentHTML('afterbegin', renderCardHTML(record));
+}
+
+function updateSelectionUI() {
+  for (const card of el.requestList.querySelectorAll('.request-card')) {
+    card.classList.toggle('selected', card.dataset.id === state.selectedId);
+  }
+}
+
 // ========== RENDER: Detail ==========
 let selectedRequest = null; // cached full record for mode-toggle and copy buttons
 
@@ -1060,7 +1004,7 @@ async function renderDetail(id) {
     el.detailContent.style.display = '';
 
     const sc = r.responseStatus ? (r.responseStatus >= 200 && r.responseStatus < 300 ? 'status-2xx' : r.responseStatus >= 400 ? 'status-4xx' : 'status-error') : 'status-error';
-    const cost = calcCost(r.model, r.tokenUsage?.input_tokens, r.tokenUsage?.output_tokens);
+    const cost = typeof r.costUsd === 'number' ? r.costUsd : null;
     el.detailMeta.innerHTML = `
       <div class="item"><strong>ID</strong> ${escapeHtml(r.id)}</div>
       <div class="item"><strong>Time</strong> ${fmtDateTime(r.timestamp)}</div>
@@ -1114,49 +1058,129 @@ function renderBodyContent(target, body) {
 }
 
 // ========== RENDER: Stream ==========
-function renderLiveStream() {
-  const msgs = state.streamMessages;
-  if (msgs.length === 0) {
-    el.streamOutput.innerHTML = `<div class="empty-state" style="height:200px"><div class="icon">&#9678;</div><div>Waiting for stream</div></div>`;
-    el.streamCount.textContent = '0 messages';
-    return;
-  }
+// Deltas are appended into per-request blocks as they arrive. Rebuilding the
+// whole panel per delta was O(chunks²) and made long streams stutter.
+function resetStream() {
+  state.streamGroups = [];
+  el.streamOutput.innerHTML = '<div class="empty-state" style="height:200px"><div class="icon">&#9678;</div><div>Waiting for stream</div><div style="font-size:10px">Send a request with stream=true</div></div>';
+  updateStreamCount();
+}
 
-  const grouped = new Map();
-  for (const m of msgs) {
-    const g = grouped.get(m.id) || { id: m.id, label: m.label, route: m.route, chunks: [], usage: null };
-    g.chunks.push(m.chunk);
-    if (m.chunk && m.chunk.type === 'usage') g.usage = m.chunk.usage;
-    grouped.set(m.id, g);
-  }
+function updateStreamCount() {
+  const n = state.streamGroups.length;
+  el.streamCount.textContent = n === 1 ? '1 stream' : n + ' streams';
+}
 
-  let html = '';
-  for (const g of grouped.values()) {
-    html += `<div class="stream-entry"><div class="entry-header"><span>[${escapeHtml(g.label||g.route)}]</span>${g.usage ? `<span style="color:var(--success)">Tokens: ${escapeHtml(fmtTokens(g.usage))}</span>` : ''}</div>`;
-    for (const chunk of g.chunks) {
-      if (chunk.type === 'text') {
-        html += `<div class="entry-text">${escapeHtml(chunk.content)}</div>`;
-      } else if (chunk.type === 'tool_start') {
-        html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${escapeHtml(chunk.name||'tool')} (${escapeHtml(chunk.id||'')})</div><div class="tool-args">`;
-      } else if (chunk.type === 'tool_args') {
-        html += `<span>${escapeHtml(chunk.content)}</span>`;
-      } else if (chunk.type === 'thinking') {
-        html += `<div class="entry-text" style="opacity:.6;font-style:italic">${escapeHtml(chunk.content)}</div>`;
-      } else if (chunk.type === 'done') {
-        html += `</div></div>`;
-      } else if (chunk.type === 'item_added') {
-        if (chunk.item && chunk.item.type === 'function_call') {
-          html += `<div class="entry-tool"><div class="tool-name">&#x26ED; ${escapeHtml(chunk.item.name||'tool')} (${escapeHtml(chunk.item.call_id||'')})</div><div class="tool-args">`;
-        } else {
-          html += `<div class="entry-text" style="opacity:.6">[${escapeHtml(chunk.item?.type||'item')}]</div>`;
-        }
-      } else if (chunk.type === 'item_done') { html += `</div></div>`; }
-      else if (chunk.type === 'error') { html += `<div style="color:var(--danger)">${escapeHtml(chunk.error||'error')}</div>`; }
+function createStreamGroup(frame) {
+  const group = { id: frame.id, label: frame.label, route: frame.route, textRun: null, toolRun: null };
+
+  group.element = document.createElement('div');
+  group.element.className = 'stream-entry';
+
+  const header = document.createElement('div');
+  header.className = 'entry-header';
+  const label = document.createElement('span');
+  label.textContent = '[' + (frame.label || frame.route) + ']';
+  group.usageElement = document.createElement('span');
+  group.usageElement.style.color = 'var(--success)';
+  header.append(label, group.usageElement);
+
+  group.body = document.createElement('div');
+  group.element.append(header, group.body);
+  return group;
+}
+
+function openTextRun(group, className) {
+  if (group.textRun && group.textRun.className === className) return group.textRun;
+  const container = document.createElement('div');
+  container.className = className;
+  const node = document.createTextNode('');
+  container.appendChild(node);
+  group.body.appendChild(container);
+  group.textRun = { className, node };
+  group.toolRun = null;
+  return group.textRun;
+}
+
+function openToolRun(group, name, id) {
+  const container = document.createElement('div');
+  container.className = 'entry-tool';
+  const title = document.createElement('div');
+  title.className = 'tool-name';
+  title.textContent = '⚙ ' + (name || 'tool') + (id ? ' (' + id + ')' : '');
+  const args = document.createElement('div');
+  args.className = 'tool-args';
+  const node = document.createTextNode('');
+  args.appendChild(node);
+  container.append(title, args);
+  group.body.appendChild(container);
+  group.toolRun = { node };
+  group.textRun = null;
+}
+
+function appendStreamLine(group, text, className) {
+  const line = document.createElement('div');
+  line.className = className;
+  line.textContent = text;
+  group.body.appendChild(line);
+  group.textRun = null;
+  group.toolRun = null;
+}
+
+function appendStreamChunk(group, chunk) {
+  switch (chunk.type) {
+    case 'text':
+      openTextRun(group, 'entry-text').node.appendData(chunk.content || '');
+      break;
+    case 'thinking':
+      openTextRun(group, 'entry-text entry-thinking').node.appendData(chunk.content || '');
+      break;
+    case 'tool_start':
+      openToolRun(group, chunk.name, chunk.id);
+      break;
+    case 'tool_args':
+      if (!group.toolRun) openToolRun(group, null, null);
+      group.toolRun.node.appendData(chunk.content || '');
+      break;
+    case 'item_added':
+      if (chunk.item && chunk.item.type === 'function_call') {
+        openToolRun(group, chunk.item.name, chunk.item.call_id);
+      } else {
+        appendStreamLine(group, '[' + ((chunk.item && chunk.item.type) || 'item') + ']', 'entry-text entry-note');
+      }
+      break;
+    case 'item_done':
+    case 'done':
+      group.textRun = null;
+      group.toolRun = null;
+      break;
+    case 'usage':
+      group.usageElement.textContent = 'Tokens: ' + fmtTokens(chunk.usage);
+      break;
+    case 'error':
+      appendStreamLine(group, chunk.error || 'error', 'entry-text entry-error');
+      break;
+  }
+}
+
+function appendStreamFrame(frame) {
+  let group = state.streamGroups.find(g => g.id === frame.id);
+  if (!group) {
+    const emptyState = el.streamOutput.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+    group = createStreamGroup(frame);
+    state.streamGroups.push(group);
+    el.streamOutput.appendChild(group.element);
+    while (state.streamGroups.length > MAX_STREAM_GROUPS) {
+      state.streamGroups.shift().element.remove();
     }
-    html += '</div>';
+    updateStreamCount();
   }
-  el.streamOutput.innerHTML = html;
-  el.streamCount.textContent = msgs.length + ' messages';
+
+  for (const chunk of frame.chunks || []) {
+    appendStreamChunk(group, chunk);
+  }
+
   if (state.streamAutoScroll) el.streamOutput.scrollTop = el.streamOutput.scrollHeight;
 }
 
@@ -1164,17 +1188,8 @@ function renderLiveStream() {
 function renderStats() {
   if (!state.stats) { el.statsCards.innerHTML = '<div class="empty-state"><div>Loading…</div></div>'; return; }
   const s = state.stats;
-
-  // Single pass: totalCost + costByModel
-  let totalCost = 0;
-  const costByModel = new Map();
-  for (const r of state.requests) {
-    const c = calcCost(r.model, r.tokenUsage?.input_tokens, r.tokenUsage?.output_tokens);
-    if (c != null) {
-      totalCost += c;
-      costByModel.set(r.model, (costByModel.get(r.model) || 0) + c);
-    }
-  }
+  const totalCost = s.totalCostUsd || 0;
+  const costByModel = Object.entries(s.costByModel || {});
 
   const uptime = s.uptimeMs ? formatUptime(s.uptimeMs) : '—';
   const errorPct = (s.errorRate * 100).toFixed(1);
@@ -1208,10 +1223,10 @@ function renderStats() {
     chartsHtml += '</div>';
   }
 
-  if (costByModel.size > 0) {
-    const maxC = Math.max(...costByModel.values(), 0.001);
+  if (costByModel.length > 0) {
+    const maxC = Math.max(...costByModel.map(([, cost]) => cost), 0.001);
     chartsHtml += '<div class="bar-chart"><h3>Cost by Model</h3>';
-    for (const [model, cost] of [...costByModel.entries()].sort((a,b)=>b[1]-a[1])) {
+    for (const [model, cost] of [...costByModel].sort((a,b)=>b[1]-a[1])) {
       const pct = Math.round((cost/maxC)*100);
       chartsHtml += `<div class="bar-row"><span class="bar-label">${escapeHtml(model)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-value">${fmtCost(cost)}</span></div>`;
     }
@@ -1272,15 +1287,13 @@ function handleWsMessage(type, data) {
       if (existing >= 0) state.requests[existing] = data;
       else state.requests.unshift(data);
       if (state.requests.length > 500) state.requests.length = 500;
-      renderRequestList();
+      replaceCard(data);
       refreshStatsDebounced();
       if (state.autoScroll && !state.selectedId) selectRequest(data.id);
       break;
     }
     case 'stream-chunk': {
-      state.streamMessages.push(data);
-      if (state.streamMessages.length > 2000) state.streamMessages.shift();
-      renderLiveStream();
+      appendStreamFrame(data);
       break;
     }
     case 'config-updated': {
@@ -1290,9 +1303,9 @@ function handleWsMessage(type, data) {
       break;
     }
     case 'requests-cleared': {
-      state.requests = []; state.selectedId = null; state.streamMessages = [];
+      state.requests = []; state.selectedId = null; state.expandedId = null; state.replayDraft = {};
       selectedRequest = null;
-      renderRequestList(); renderLiveStream();
+      renderRequestList(); resetStream();
       el.detailEmpty.style.display = ''; el.detailContent.style.display = 'none';
       refreshStatsDebounced();
       toast('Requests cleared');
@@ -1303,7 +1316,9 @@ function handleWsMessage(type, data) {
 
 function selectRequest(id) {
   state.selectedId = id;
-  renderRequestList();
+  const record = state.requests.find(r => r.id === id);
+  if (record) replaceCard(record);
+  updateSelectionUI();
   renderDetail(id);
 }
 
@@ -1335,7 +1350,7 @@ const CARD_ACTIONS = {
       const r = state.requests.find(item => item.id === id);
       if (!r) return;
       if (r.requestBodyTruncated) return toast('Replay unavailable: request capture was truncated', true);
-      await doReplay(id, null, null, true);
+      await doReplay(id, null, true);
     } catch (err) {
       toast('Unable to load request: ' + err.message, true);
     }
@@ -1363,8 +1378,7 @@ const CARD_ACTIONS = {
     if (!ta) return;
     let body;
     try { body = JSON.parse(ta.value); } catch { toast('Invalid JSON', true); return; }
-    const record = state.requests.find(r => r.id === id);
-    doReplay(id, body, record && record.route, false);
+    doReplay(id, body, false);
   },
   'replay-cancel'() {
     state.replayingId = null;
@@ -1373,11 +1387,12 @@ const CARD_ACTIONS = {
   detail(id) { selectRequest(id); },
 };
 
-async function doReplay(id, requestBody, route, useStoredRequest) {
-  if (!useStoredRequest && !route) return;
+async function doReplay(id, requestBody, useStoredRequest) {
   renderRequestList();
   try {
-    const payload = useStoredRequest ? { requestId: id } : { requestBody, route };
+    // Always pass the source id so the server can re-use the headers the
+    // original request was forwarded with, including edited replays.
+    const payload = useStoredRequest ? { requestId: id } : { requestId: id, requestBody };
     await apiPost('/__api/replay', payload);
     state.replayingId = null;
     toast('Replay complete');
@@ -1470,13 +1485,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.detail === 2) {
       selectRequest(id);
     } else {
-      state.selectedId = state.selectedId === id ? null : id;
-      renderRequestList();
-      if (state.selectedId) {
-        const selCard = el.requestList.querySelector(`.request-card[data-id="${state.selectedId}"]`);
-        if (selCard) selCard.classList.add('expanded');
-      }
+      state.expandedId = state.expandedId === id ? null : id;
+      state.selectedId = state.expandedId;
+      const record = state.requests.find(r => r.id === id);
+      if (record) replaceCard(record);
+      updateSelectionUI();
     }
+  });
+
+  // Keep replay edits across re-renders
+  el.requestList.addEventListener('input', (e) => {
+    if (e.target.tagName !== 'TEXTAREA') return;
+    const card = e.target.closest('.request-card');
+    if (card) state.replayDraft[card.dataset.id] = e.target.value;
   });
 
   // Filter chips
@@ -1552,7 +1573,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#saveSettingsBtn').addEventListener('click', saveSettings);
 
   // Stream controls
-  $('#streamClearBtn').addEventListener('click', () => { state.streamMessages = []; renderLiveStream(); });
+  $('#streamClearBtn').addEventListener('click', resetStream);
   $('#streamAutoScrollBtn').addEventListener('click', function () {
     state.streamAutoScroll = !state.streamAutoScroll;
     this.textContent = state.streamAutoScroll ? 'Scroll' : 'Manual';

@@ -57,3 +57,36 @@ test('an in-flight record still completes after ring-buffer eviction', () => {
   assert.equal(stats.pendingRequests, 0);
   assert.equal(store.getById(first.id), null);
 });
+
+test('stats sum the cost of completed requests exactly once', () => {
+  const store = createStore(10);
+  const record = store.add({ route: '/v1/messages', model: 'claude-sonnet-4-6', responseStatus: null });
+  store.complete(record.id, { responseStatus: 200, latencyMs: 10, costUsd: 0.0105 });
+  store.complete(record.id, { latencyMs: 999, costUsd: 0.0105 });
+
+  const stats = store.getStats();
+  assert.equal(stats.totalCostUsd, 0.0105);
+  assert.deepEqual(stats.costByModel, { 'claude-sonnet-4-6': 0.0105 });
+});
+
+test('stats group cost per model and ignore records without a cost', () => {
+  const store = createStore(10);
+  store.add({ model: 'gpt-5', responseStatus: 200, costUsd: 0.25, latencyMs: 5 });
+  store.add({ model: 'gpt-5', responseStatus: 200, costUsd: 0.75, latencyMs: 5 });
+  store.add({ model: 'local-llama', responseStatus: 200, latencyMs: 5 });
+  store.add({ model: 'gpt-5', responseStatus: 502, error: 'boom', latencyMs: 5 });
+
+  const stats = store.getStats();
+  assert.equal(stats.totalCostUsd, 1);
+  assert.deepEqual(stats.costByModel, { 'gpt-5': 1 });
+});
+
+test('clearing the store resets accumulated cost', () => {
+  const store = createStore(10);
+  store.add({ model: 'gpt-5', responseStatus: 200, costUsd: 1.5, latencyMs: 5 });
+  store.clear();
+
+  const stats = store.getStats();
+  assert.equal(stats.totalCostUsd, 0);
+  assert.deepEqual(stats.costByModel, {});
+});

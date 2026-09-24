@@ -21,17 +21,44 @@
 
 ## 特性
 
-- 极简实现，单入口 `server.js` 覆盖全部功能
+- 极简实现：`server.js` 启动入口 + `lib/` 下 7 个职责单一的小模块
 - **Web Dashboard**：Timeline 风格请求卡片、实时流查看、统计面板、在线配置
-- **Replay 重放**：一键重发历史请求，内嵌 JSON 编辑器支持快速修改
-- **费用估算**：自动匹配模型定价（Claude / GPT / Gemini），按请求和按模型统计费用
+- **Replay 重放**：一键重发历史请求，内嵌 JSON 编辑器支持快速修改，并复用原始请求头
+- **费用估算**：服务端匹配模型定价（Claude / GPT / Gemini），按请求和按模型统计
+- **失败可见**：上游报错、body 解析失败、超过体积限制，都会作为一条记录出现在列表里
 - **路由筛选**：按 API 路由和 HTTP 状态码快速过滤请求列表
 - **WebSocket 实时推送**：流式响应在浏览器中实时展现，请求结果即时推送
 - 支持 Anthropic `messages`、OpenAI `responses`、`chat/completions` 协议
 - 支持非流式响应与 SSE 流式响应
-- 记录请求体、响应体和异常信息
+- 记录请求体、响应体、异常信息，以及脱敏后的上游请求头
 - 尽量透明转发请求头和响应头
 - 客户端断连时自动中止上游请求，避免资源浪费
+
+## 界面预览
+
+### 请求列表与请求详情
+
+左侧 Timeline 卡片直接显示路由、模型、延迟、token 与估算费用，以及请求/响应预览；右侧展示完整 Request / Response Body。展开的卡片上可以直接 Replay 或 Edit & Replay。
+
+![请求列表与请求详情](docs/screenshots/dashboard-overview.png)
+
+### 实时流（Live）
+
+流式响应的 delta 通过 WebSocket 实时推送到浏览器，按请求分组累积成连续文本，工具调用单独成块，流结束后在分组标题上显示 token 用量。
+
+![实时流](docs/screenshots/dashboard-live-stream.png)
+
+### 统计面板（Stats）
+
+请求总数、错误率、延迟、token 与费用，以及按模型 / 按路由 / 按模型费用的分布。费用由服务端在请求完成时计算一次，与 token 统计同一口径。
+
+![统计面板](docs/screenshots/dashboard-stats.png)
+
+### 深色模式
+
+跟随系统 `prefers-color-scheme` 自动切换。
+
+![深色模式](docs/screenshots/dashboard-dark.png)
 
 ## 适用场景
 
@@ -46,14 +73,18 @@
 
 ```text
 .
-├── server.js              # 统一入口（Dashboard + WebSocket + 全部代理路由）
+├── server.js              # 启动入口（读取配置 → 创建应用 → 监听端口）
 ├── lib/
+│   ├── app.js             # 应用工厂：Dashboard + WebSocket + 管理 API + 代理路由挂载
 │   ├── config.js          # 统一配置加载/保存，兼容旧字段
-│   ├── proxy.js           # 代理中间件工厂（fetch / stream / store / broadcast）
+│   ├── proxy.js           # 共享的上游请求实现 + 代理中间件工厂
 │   ├── store.js           # 环形缓冲区请求存储 + O(1) ID 索引 + 实时统计
-│   └── sse.js             # SSE 解析、流组装、实时 chunk 解析、token 提取
+│   ├── sse.js             # SSE 解析、流组装、实时 chunk 解析、token 提取
+│   ├── preview.js         # 列表卡片使用的请求/响应预览文本
+│   └── pricing.js         # 模型定价表与费用估算
 ├── public/
 │   └── dashboard.html     # 自包含 Web Dashboard，零构建
+├── docs/screenshots/      # README 截图
 ├── server-anthropic.js    # [保留] 旧版 Anthropic 入口
 ├── server-openai.js       # [保留] 旧版 OpenAI 入口
 ├── server-raw.js          # [保留] 旧版 Raw 入口
@@ -116,9 +147,9 @@ npm start
 ║  Dashboard : http://localhost:3000                   ║
 ║  Upstream  : https://your-ai-api-upstream            ║
 ╠══════════════════════════════════════════════════════╣
-║  POST /v1/messages                                  ║
-║  POST /v1/responses                                 ║
-║  POST /v1/chat/completions                          ║
+║  POST /v1/messages                                   ║
+║  POST /v1/responses                                  ║
+║  POST /v1/chat/completions                           ║
 ╚══════════════════════════════════════════════════════╝
 ```
 
@@ -210,11 +241,13 @@ Dashboard 使用的内部 API，也可直接调用：
 |--------|------|---------|
 | `GET` | `/__api/config` | 读取配置（apiKey 已脱敏） |
 | `PUT` | `/__api/config` | 部分更新配置，自动保存到文件 |
-| `GET` | `/__api/requests` | 请求历史列表 (`?limit=N`，O(limit) 高效查询) |
-| `GET` | `/__api/requests/:id` | 单个请求完整详情，大 body 自动截断 |
+| `GET` | `/__api/requests` | 请求历史列表 (`?limit=N`，O(limit) 高效查询)，含预览文本与估算费用 |
+| `GET` | `/__api/requests/:id` | 单个请求完整详情（含实际转发到上游的请求头，敏感值已脱敏），大 body 自动截断 |
 | `DELETE` | `/__api/requests` | 清除所有请求记录 |
-| `GET` | `/__api/stats` | 实时统计信息 |
-| `POST` | `/__api/replay` | 重放请求 `{ route, requestBody }` |
+| `GET` | `/__api/stats` | 实时统计信息，含累计 token 与费用 |
+| `POST` | `/__api/replay` | 重放请求：`{ requestId }` 重放原始请求，或 `{ requestId, requestBody }` 用改过的 body 重放 |
+
+重放会复用原始请求转发到上游时的请求头（例如 `anthropic-version`、`anthropic-beta`），只把其中的凭据换成当前配置里的 apiKey，因此改过 body 的 Edit & Replay 同样能带上正确的协议头。
 
 ## WebSocket 协议
 
@@ -222,10 +255,12 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 
 | type | 触发时机 | data |
 |------|---------|------|
-| `request-detail` | 请求完成（成功或失败） | 完整请求记录（含 request / response body） |
-| `stream-chunk` | 流式响应每个 SSE delta | `{ id, route, label, chunk: { type, content } }` |
+| `request-detail` | 请求完成（成功、失败，或被代理拒绝） | 完整请求记录（含 request / response body） |
+| `stream-chunk` | 流式响应每个上游读取块 | `{ id, route, label, chunks: [{ type, content }] }` |
 | `config-updated` | 配置保存到磁盘后 | `{ config }` |
 | `requests-cleared` | 请求记录被清除 | `{}` |
+
+`stream-chunk` 按上游读取块批量推送：一次网络读取中解析出的所有 delta 合成一帧，避免长流把 WebSocket 打成一帧一个 token。
 
 ## 配置说明
 
@@ -282,10 +317,10 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 流式响应不能等全部接收完再返回给客户端。当前实现同时做到三件事：
 
 1. 从上游按块读取 SSE 数据，每读到一个 chunk 立即 `res.write()` 给客户端
-2. 同步解析 chunk 中的 SSE 事件，通过 WebSocket 推送到 Dashboard 实时流面板
+2. 同步解析 chunk 中的 SSE 事件，按上游读取块批量推送给 Dashboard 实时流面板
 3. 在 `maxCaptureBytes` 范围内组装结构化 JSON，存入内存环形缓冲区并写入日志文件
 
-代理不会因为 Dashboard 连接断开而影响客户端的流式体验，也不会因为大量 Dashboard 连接而导致上游流量放大。
+代理不会因为 Dashboard 连接断开而影响客户端的流式体验，也不会因为大量 Dashboard 连接而导致上游流量放大。流向客户端的方向带有背压：`res.write()` 返回 false 时会等 `drain`，客户端断连则立刻以错误结束等待。
 
 ### 3. 客户端断连传播
 
@@ -307,7 +342,19 @@ Dashboard 通过 WebSocket 接收实时推送，消息格式：`{ type, data }`
 
 ### 6. 请求费用估算
 
-Dashboard 内置 30+ 模型定价表，通过模糊匹配模型名自动识别定价（如 `claude-sonnet-4-6-20250219` 匹配 `claude-sonnet-4-6`）。每次请求根据 `input_tokens` 和 `output_tokens` 估算费用，在卡片和统计面板中展示。费用计算在客户端执行并做了缓存，不影响渲染性能。
+服务端内置 20+ 模型定价表（`lib/pricing.js`），按最长匹配识别模型名，因此带日期后缀（`claude-sonnet-4-6-20250219`）或网关前缀（`anthropic/claude-sonnet-4-6`）的模型名都能匹配到同一份定价。每条记录在完成时计算一次 `costUsd`，统计接口汇总出 `totalCostUsd` 和按模型的 `costByModel`。
+
+费用只有服务端一份口径：卡片、详情面板、统计面板显示的是同一个值，和 token 统计覆盖同一时间窗口，不会随前端重渲染或缓存漂移。定价是估算值，不等于实际账单。
+
+### 7. 被拒绝的请求同样可见
+
+请求体不是合法 JSON，或超过 `bodyLimit` 时，Express 不会进入任何路由处理函数。如果不处理，这类失败既不会出现在 Dashboard 里，客户端还会收到一页带本机绝对路径的 HTML 堆栈——对一个调试代理来说，这恰恰是最该被看见的失败。
+
+代理注册了统一错误中间件：按路由的协议形状返回 JSON 错误（Anthropic 用 `{ type: 'error', error: { ... } }`，OpenAI 用 `{ error: { ... } }`），同时写入一条失败记录并广播给 Dashboard，因此它和其他请求一样出现在列表里。
+
+### 8. 请求头被记录并可复用
+
+转发到上游的请求头会脱敏后记录在请求记录里（名字里含 `authorization`、`api-key`、`token`、`secret`、`cookie` 的头一律替换为 `[redacted]`），详情接口可以直接核对代理究竟发了什么。Replay 复用这份记录，把脱敏占位符丢弃后用当前配置的 apiKey 补齐，所以 `anthropic-version` 之类的协议头不会在重放时丢失。
 
 ## 运行要求
 
@@ -325,6 +372,8 @@ Dashboard 内置 30+ 模型定价表，通过模糊匹配模型名自动识别�
 
 - 当前仍是 "轻量代理"，不是生产级 API 网关
 - 没有限流、熔断、重试等生产网关能力
+- 只代理上面列出的三条 POST 路由；`GET /v1/models` 之类的其它路径不会被转发，直接返回 404 且不产生记录
+- Live 面板的 token 用量依赖流式事件里的 usage：`chat/completions` 的流式解析目前只取 delta，不解析最后一个 chunk 的 usage，因此该路由在 Live 面板不显示 token 用量（请求完成后的组装结果里仍然有 usage，卡片和统计面板正常）
 - 流式日志解析针对主流事件格式，不保证覆盖所有未来事件类型
 - 请求历史仅保存在内存中，进程重启后会清空
 - Dashboard 没有独立登录页，因此管理界面强制仅限本机
@@ -346,7 +395,7 @@ npm run check
 npm test
 ```
 
-测试覆盖配置校验与密钥隐藏、请求统计生命周期、代理头部/查询参数转发，以及流式捕获上限。
+测试覆盖配置校验与密钥隐藏、请求统计生命周期与费用聚合、定价匹配与预览文本提取、代理头部与查询参数转发、流式捕获上限与超时，以及起真实 HTTP 服务的端到端用例：三条代理路由、管理 API、Replay 头部复用、被拒绝请求的入库，和 WebSocket 推送。
 
 ## 贡献
 
